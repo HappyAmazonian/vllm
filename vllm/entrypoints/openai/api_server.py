@@ -398,6 +398,7 @@ async def get_server_load_metrics(request: Request):
 
 @router.get("/ping", response_class=Response)
 @router.post("/ping", response_class=Response)
+@sagemaker_standards.custom_ping_handler
 async def ping(raw_request: Request) -> Response:
     """Ping check. Endpoint required for SageMaker"""
     return await health(raw_request)
@@ -1255,6 +1256,7 @@ INVOCATION_VALIDATORS = [
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
+@sagemaker_standards.register_invocation_handler
 @sagemaker_standards.stateful_session_manager()
 @sagemaker_standards.inject_adapter_id(adapter_path="model")
 async def invocations(raw_request: Request):
