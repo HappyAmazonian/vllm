@@ -398,7 +398,7 @@ async def get_server_load_metrics(request: Request):
 
 @router.get("/ping", response_class=Response)
 @router.post("/ping", response_class=Response)
-@sagemaker_standards.custom_ping_handler
+@sagemaker_standards.register_ping_handler
 async def ping(raw_request: Request) -> Response:
     """Ping check. Endpoint required for SageMaker"""
     return await health(raw_request)
