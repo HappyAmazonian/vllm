@@ -50,7 +50,11 @@ class TestMiddlewareIntegration:
 
     @pytest.mark.asyncio
     async def test_customer_middleware_with_vllm_server(self):
-        """Test that customer middlewares work with actual vLLM server."""
+        """Test that customer middlewares work with actual vLLM server.
+        
+        Tests decorator-based middlewares (@custom_middleware, @input_formatter, @output_formatter)
+        on multiple endpoints (chat/completions, invocations).
+        """
         try:
             from model_hosting_container_standards.sagemaker.config import (
                 SageMakerEnvVars,
@@ -58,11 +62,21 @@ class TestMiddlewareIntegration:
         except ImportError:
             pytest.skip("model-hosting-container-standards not available")
 
-        # Customer writes a middleware script
+        # Customer writes a middleware script with multiple decorators
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write(
                 """
-from model_hosting_container_standards.common.fastapi.middleware import custom_middleware, output_formatter
+from model_hosting_container_standards.common.fastapi.middleware import custom_middleware, input_formatter, output_formatter
+
+# Global flag to track if input formatter was called
+_input_formatter_called = False
+
+@input_formatter
+async def customer_input_formatter(request):
+    # Process input - mark that input formatter was called
+    global _input_formatter_called
+    _input_formatter_called = True
+    return request
 
 @custom_middleware("throttle")
 async def customer_throttle_middleware(request, call_next):
@@ -74,9 +88,14 @@ async def customer_throttle_middleware(request, call_next):
 
 @output_formatter
 async def customer_output_formatter(response):
+    global _input_formatter_called
     response.headers["X-Customer-Processed"] = "true"
+    # Since input_formatter and output_formatter are combined into pre_post_process middleware,
+    # if output_formatter is called, input_formatter should have been called too
+    if _input_formatter_called:
+        response.headers["X-Input-Formatter-Called"] = "true"
     order = response.headers.get("X-Middleware-Order", "")
-    response.headers["X-Middleware-Order"] = order + "pre_post_process,"
+    response.headers["X-Middleware-Order"] = order + "output_formatter,"
     return response
 """
             )
@@ -103,8 +122,8 @@ async def customer_output_formatter(response):
             ]
 
             with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
-                # Test that middlewares are applied to vLLM endpoints
-                response = requests.post(
+                # Test 1: Middlewares applied to chat/completions endpoint
+                chat_response = requests.post(
                     server.url_for("v1/chat/completions"),
                     json={
                         "model": MODEL_NAME,
@@ -114,23 +133,46 @@ async def customer_output_formatter(response):
                     },
                 )
 
-                assert response.status_code == 200
-
-                # Verify customer middlewares were executed
-                assert "X-Customer-Throttle" in response.headers
-                assert response.headers["X-Customer-Throttle"] == "applied"
-                assert "X-Customer-Processed" in response.headers
-                assert response.headers["X-Customer-Processed"] == "true"
+                assert chat_response.status_code == 200
+                
+                # Verify all middlewares were executed
+                assert "X-Customer-Throttle" in chat_response.headers
+                assert chat_response.headers["X-Customer-Throttle"] == "applied"
+                assert "X-Customer-Processed" in chat_response.headers
+                assert chat_response.headers["X-Customer-Processed"] == "true"
+                
+                # Verify input formatter was called
+                assert "X-Input-Formatter-Called" in chat_response.headers
+                assert chat_response.headers["X-Input-Formatter-Called"] == "true"
 
                 # Verify middleware execution order
-                execution_order = response.headers.get("X-Middleware-Order", "").rstrip(
-                    ","
-                )
+                execution_order = chat_response.headers.get("X-Middleware-Order", "").rstrip(",")
                 order_parts = execution_order.split(",") if execution_order else []
-
-                # Should have both middleware components
                 assert "throttle" in order_parts
-                assert "pre_post_process" in order_parts
+                assert "output_formatter" in order_parts
+
+                # Test 2: Middlewares applied to invocations endpoint
+                invocations_response = requests.post(
+                    server.url_for("invocations"),
+                    json={
+                        "model": MODEL_NAME,
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "max_tokens": 5,
+                        "temperature": 0.0,
+                    },
+                )
+
+                assert invocations_response.status_code == 200
+                
+                # Verify all middlewares were executed
+                assert "X-Customer-Throttle" in invocations_response.headers
+                assert invocations_response.headers["X-Customer-Throttle"] == "applied"
+                assert "X-Customer-Processed" in invocations_response.headers
+                assert invocations_response.headers["X-Customer-Processed"] == "true"
+                
+                # Verify input formatter was called
+                assert "X-Input-Formatter-Called" in invocations_response.headers
+                assert invocations_response.headers["X-Input-Formatter-Called"] == "true"
 
         finally:
             os.unlink(script_path)
@@ -192,33 +234,46 @@ async def ping_tracking_middleware(request, call_next):
             os.unlink(script_path)
 
     @pytest.mark.asyncio
-    async def test_input_formatter_with_invocations_endpoint(self):
-        """Test that input formatter works with SageMaker invocations endpoint."""
+    async def test_middleware_env_var_override(self):
+        """Test middleware environment variable overrides."""
         try:
             from model_hosting_container_standards.sagemaker.config import (
                 SageMakerEnvVars,
             )
+            from model_hosting_container_standards.common.fastapi.config import (
+                FastAPIEnvVars,
+            )
         except ImportError:
             pytest.skip("model-hosting-container-standards not available")
 
-        # Customer writes a middleware script with input formatter
+        # Create a script with middleware functions specified via env vars
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write(
                 """
-from model_hosting_container_standards.common.fastapi.middleware import input_formatter, custom_middleware
+from fastapi import Request
 
-@input_formatter
-async def invocation_input_processor(request):
-    # Process input for invocations - add a custom header to track processing
-    if hasattr(request, 'headers'):
-        request.headers["X-Input-Processed"] = "true"
+# Global flag to track if pre_process was called
+_pre_process_called = False
+
+async def env_throttle_middleware(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Env-Throttle"] = "applied"
+    return response
+
+async def env_pre_process(request: Request) -> Request:
+    # Mark that pre_process was called
+    global _pre_process_called
+    _pre_process_called = True
     return request
 
-@custom_middleware("throttle")
-async def invocation_middleware(request, call_next):
-    response = await call_next(request)
-    if request.url.path == "/invocations":
-        response.headers["X-Invocation-Processed"] = "true"
+async def env_post_process(response):
+    global _pre_process_called
+    if hasattr(response, 'headers'):
+        response.headers["X-Env-Post-Process"] = "applied"
+        # Since pre_process and post_process are combined into pre_post_process middleware,
+        # if post_process is called, pre_process should have been called too
+        if _pre_process_called:
+            response.headers["X-Pre-Process-Called"] = "true"
     return response
 """
             )
@@ -228,9 +283,14 @@ async def invocation_middleware(request, call_next):
             script_dir = os.path.dirname(script_path)
             script_name = os.path.basename(script_path)
 
+            # Set environment variables for middleware
+            # Use script_name with .py extension as per plugin example
             env_vars = {
                 SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
                 SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
+                FastAPIEnvVars.CUSTOM_FASTAPI_MIDDLEWARE_THROTTLE: f"{script_name}:env_throttle_middleware",
+                FastAPIEnvVars.CUSTOM_PRE_PROCESS: f"{script_name}:env_pre_process",
+                FastAPIEnvVars.CUSTOM_POST_PROCESS: f"{script_name}:env_post_process",
             }
 
             args = [
@@ -244,93 +304,22 @@ async def invocation_middleware(request, call_next):
             ]
 
             with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
-                # Test invocations endpoint with middleware
-                response = requests.post(
-                    server.url_for("invocations"),
-                    json={
-                        "model": MODEL_NAME,
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 5,
-                        "temperature": 0.0,
-                    },
-                )
-
-                assert response.status_code == 200
-                assert "X-Invocation-Processed" in response.headers
-                assert response.headers["X-Invocation-Processed"] == "true"
-
-        finally:
-            os.unlink(script_path)
-
-
-    @pytest.mark.asyncio
-    async def test_middleware_env_var_override(self):
-        """Test middleware environment variable overrides."""
-        try:
-            from model_hosting_container_standards.sagemaker.config import SageMakerEnvVars
-            from model_hosting_container_standards.common.fastapi.config import FastAPIEnvVars
-        except ImportError:
-            pytest.skip("model-hosting-container-standards not available")
-
-        # Create a script with middleware functions specified via env vars
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write("""
-from fastapi import Request
-
-async def env_throttle_middleware(request, call_next):
-    response = await call_next(request)
-    response.headers["X-Env-Throttle"] = "applied"
-    return response
-
-async def env_pre_process(request: Request) -> Request:
-    # Pre-process the request
-    return request
-
-async def env_post_process(response):
-    if hasattr(response, 'headers'):
-        response.headers["X-Env-Post-Process"] = "applied"
-    return response
-""")
-            script_path = f.name
-
-        try:
-            script_dir = os.path.dirname(script_path)
-            script_name = os.path.basename(script_path)
-            module_name = script_name[:-3]
-
-            # Set environment variables for middleware
-            env_vars = {
-                SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
-                SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-                FastAPIEnvVars.CUSTOM_FASTAPI_MIDDLEWARE_THROTTLE: f"{module_name}:env_throttle_middleware",
-                FastAPIEnvVars.CUSTOM_PRE_PROCESS: f"{module_name}:env_pre_process",
-                FastAPIEnvVars.CUSTOM_POST_PROCESS: f"{module_name}:env_post_process",
-            }
-
-            args = [
-                "--dtype", "bfloat16",
-                "--max-model-len", "2048",
-                "--enforce-eager",
-                "--max-num-seqs", "32",
-            ]
-
-            with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
                 response = requests.get(server.url_for("ping"))
                 assert response.status_code == 200
 
                 # Check if environment variable middleware was applied
-                # If supported, should have custom headers
                 headers = response.headers
+
+                # Verify that env var middlewares were applied
+                assert "X-Env-Throttle" in headers, "Throttle middleware should be applied via env var"
+                assert headers["X-Env-Throttle"] == "applied"
                 
-                # These headers would be present if env var middleware is supported
-                # We don't assert them because support may vary
-                env_throttle_applied = "X-Env-Throttle" in headers
-                env_post_process_applied = "X-Env-Post-Process" in headers
+                assert "X-Env-Post-Process" in headers, "Post-process middleware should be applied via env var"
+                assert headers["X-Env-Post-Process"] == "applied"
                 
-                # Test passes regardless of whether env vars are supported
-                # This allows the test to work even if the feature isn't fully implemented
-                print(f"Env throttle middleware applied: {env_throttle_applied}")
-                print(f"Env post process middleware applied: {env_post_process_applied}")
+                # Verify that pre_process was called
+                assert "X-Pre-Process-Called" in headers, "Pre-process should be called via env var"
+                assert headers["X-Pre-Process-Called"] == "true"
 
         finally:
             os.unlink(script_path)
