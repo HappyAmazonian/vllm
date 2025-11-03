@@ -170,7 +170,7 @@ class FrontendArgs:
     disable_fastapi_docs: bool = False
     """Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."""
     disable_sagemaker_standards: bool = False
-    """Disable SageMaker's integrations with vLLM OpenAI API server (including SageMaker endpoints and custom handler support)."""
+    """Disable SageMaker's integrations with vLLM OpenAI API server."""
     enable_prompt_tokens_details: bool = False
     """If set to True, enable prompt_tokens_details in usage."""
     enable_server_load_tracking: bool = False

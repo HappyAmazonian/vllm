@@ -16,6 +16,14 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # generation quality here
 
 
+@pytest.fixture(scope="session")
+def zephyr_lora_files():
+    """Download zephyr LoRA files once per test session."""
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+
+
 @pytest.fixture(scope="module", params=[True])
 def server_with_lora_modules_json(request, zephyr_lora_files):
     # Define the json format LoRA module configurations
