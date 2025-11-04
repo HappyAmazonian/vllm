@@ -26,7 +26,6 @@ import prometheus_client
 import pydantic
 import regex as re
 import uvloop
-import model_hosting_container_standards.sagemaker as sagemaker_standards
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
