@@ -24,7 +24,7 @@ import requests
 
 from ..utils import RemoteOpenAIServer
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "HuggingFaceTB/SmolLM2-135M-Instruct"
 
 
 class TestHandlerOverrideIntegration:
